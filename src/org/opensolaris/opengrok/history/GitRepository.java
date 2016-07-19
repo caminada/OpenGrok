@@ -158,6 +158,14 @@ public class GitRepository extends Repository {
         cmd.add("--name-only");
         cmd.add("--pretty=fuller");
 
+        // For plain files we would like to follow the complete history
+        // (this is necessary for getting the original name in given revision
+        // when handling renamed files)
+        if (filename.length() > 0 && !file.isDirectory()) {
+            cmd.add("--follow");
+            cmd.add("--");
+        }
+
         if (sinceRevision != null) {
             cmd.add(sinceRevision + "..");
         }
@@ -200,7 +208,34 @@ public class GitRepository extends Repository {
                     .substring(directoryName.length() + 1);
             ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK);
             String argv[] = {RepoCommand, "show", rev + ":" + filename};
-            process = Runtime.getRuntime().exec(argv, null, directory);
+
+            ProcessBuilder pb = new ProcessBuilder(argv);
+            pb.directory(directory);
+            process = pb.start();
+            process.waitFor();
+
+            /*
+             * If we failed to get the contents it might be that the file was
+             * renamed so we need to find its original name in that revision
+             * and retry with the original name.
+             */
+            if (process.exitValue() != 0) {
+                String origpath;
+                try {
+                    origpath = findOriginalName(filename, rev);
+                } catch (IOException exp) {
+                    LOGGER.log(Level.SEVERE, "Failed to get original revision: {0}",
+                            exp.getClass().toString());
+                    return null;
+                }
+                if (origpath != null) {
+                    argv[2] = rev + ":" + origpath;
+                    pb = new ProcessBuilder(argv);
+                    pb.directory(directory);
+                    process = pb.start();
+                    process.waitFor();
+                }
+            }
 
             InputStream in = process.getInputStream();
             int len;
@@ -216,7 +251,10 @@ public class GitRepository extends Repository {
                 process.destroy();
                 String path = getCorrectPath(filename, rev);
                 argv[2] = rev + ":" + path;
-                process = Runtime.getRuntime().exec(argv, null, directory);
+                pb = new ProcessBuilder(argv);
+                pb.directory(directory);
+                process = pb.start();
+                process.waitFor();
                 in = process.getInputStream();
                 while ((len = in.read(buffer)) != -1) {
                     if (len > 0) {
@@ -244,6 +282,98 @@ public class GitRepository extends Repository {
         return ret;
     }
 
+     /**
+     * Get the name of file in given revision
+     * @param fullpath file path
+     * @param full_rev_to_find revision number (in the form of {rev}:{node|short})
+     * @returns original filename
+     */
+    private String findOriginalName(String fullpath, String full_rev_to_find) 
+            throws HistoryException, IOException {
+        //String file = fullpath.substring(directoryName.length() + 1);
+        String file = fullpath;
+        ArrayList<String> argv = new ArrayList<String>();
+
+        // Extract {rev} from the full revision specification string.
+        String[] rev_array = full_rev_to_find.split(":");
+        String rev_to_find = rev_array[0];
+        if (rev_to_find.isEmpty()) {
+           LOGGER.log(Level.SEVERE,
+                "Invalid revision string: {0}", full_rev_to_find);
+            return null;
+        }
+
+        /*
+         * Get the list of file renames for given file to the specified
+         * revision. We need to get them from the newest to the oldest
+         * (hence the reverse()) so that we can follow the renames down
+         * to the revision we are after.
+         * 
+         * The command is as follows:
+         * git log --follow --pretty="%H" --name-only fullpath
+         * 
+         * Output format is
+         * ==
+         * 359f28929b8f9db802efa0199966f2cd2d4879cd
+         * 
+         * project/src/main/java/com/example/somepackage/Example.java
+         * 1c212a3f48a8447fe5784735dbff9c32cd9f7687
+         * 
+         * project/src/main/java/com/old/example/oldpackage/oldsubpackage/OldExample.java
+         * ==
+         */
+        argv.add(ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK));
+        argv.add("log");
+        argv.add("--follow");
+        argv.add("--format=commit:%H" + System.getProperty("line.separator"));
+        argv.add("--name-only");
+        argv.add(fullpath);
+
+        ProcessBuilder pb = new ProcessBuilder(argv);
+
+        File directory = new File(directoryName);
+        pb.directory(directory);
+        Process process = null;
+
+        process = pb.start();
+
+        String hash;
+
+
+        try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+
+               String line;
+               while ((line = in.readLine()) != null) {
+                   if (line.startsWith("commit")) {
+                       String parts[] = line.split(":");
+                       if (parts.length < 2) {
+                           throw new HistoryException("Tag line contains more than 2 columns: " + line);
+                       }
+                       hash = parts[1];
+
+                       if (hash.startsWith(rev_to_find)) {
+                       // we've found our commit - the filename is on the 2nd next line
+                       in.readLine();
+                       in.readLine();
+                       file = in.readLine();
+                       break;
+                   }
+               }
+            }
+         } finally {
+            if (process != null) {
+                try {
+                    process.exitValue();
+                } catch (IllegalThreadStateException e) {
+                    // the process is still running??? just kill it..
+                    process.destroy();
+                }
+            }
+        }
+
+        return (file);
+    }
+
     /**
      * Annotate the specified file/revision.
      *
@@ -254,7 +384,9 @@ public class GitRepository extends Repository {
      */
     @Override
     public Annotation annotate(File file, String revision) throws IOException {
+        File directory = new File(directoryName);
         List<String> cmd = new ArrayList<>();
+
         ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK);
         cmd.add(RepoCommand);
         cmd.add(BLAME);
@@ -263,60 +395,43 @@ public class GitRepository extends Repository {
         if (revision != null) {
             cmd.add(revision);
         }
-        cmd.add(file.getName());
+        cmd.add(file.getPath());
 
-        Executor exec = new Executor(cmd, file.getParentFile());
-        int status = exec.exec();
-
+        Executor exec = new Executor(cmd, directory);
+        int status = exec.exec(false);
         // File might have changed its location
         if (status != 0) {
-            cmd.clear();
-            ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK);
-            cmd.add(RepoCommand);
-            cmd.add(BLAME);
-            cmd.add("-c"); // to get correctly formed changeset IDs
-            cmd.add(ABBREV_BLAME);
-            cmd.add("-C");
-            cmd.add(file.getName());
-            exec = new Executor(cmd, file.getParentFile());
-            status = exec.exec();
-            if (status != 0) {
-                LOGGER.log(Level.SEVERE,
-                        "Failed to get blame list");
-            }
-            try (BufferedReader in = new BufferedReader(exec.getOutputReader())) {
-                String pattern = "^\\W*" + revision + " (.+?) .*$";
-                Pattern commitPattern = Pattern.compile(pattern);
-                String line = "";
-                Matcher matcher = commitPattern.matcher(line);
-                while ((line = in.readLine()) != null) {
-                    matcher.reset(line);
-                    if (matcher.find()) {
-                        String filepath = matcher.group(1);
-                        cmd.clear();
-                        ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK);
-                        cmd.add(RepoCommand);
-                        cmd.add(BLAME);
-                        cmd.add("-c"); // to get correctly formed changeset IDs
-                        cmd.add(ABBREV_BLAME);
-                        if (revision != null) {
-                            cmd.add(revision);
-                        }
-                        cmd.add("--");
-                        cmd.add(filepath);
-                        File directory = new File(directoryName);
-                        exec = new Executor(cmd, directory);
-                        status = exec.exec();
-                        if (status != 0) {
-                            LOGGER.log(Level.SEVERE,
-                                    "Failed to get blame details for modified file path");
-                        }
-                        break;
-                    }
-                }
-            }
-        }
+            String origpath;
+            try {
+                origpath = findOriginalName(file.getPath(), revision);
 
+            } catch (IOException | HistoryException exp) {
+                LOGGER.log(Level.SEVERE, "Failed to get original revision: {0}",
+                        exp.getClass().toString());
+                return null;
+            }
+            if (origpath != null) {
+                cmd.clear();
+                ensureCommand(CMD_PROPERTY_KEY, CMD_FALLBACK);
+                cmd.add(RepoCommand);
+                cmd.add(BLAME);
+                cmd.add("-c"); // to get correctly formed changeset IDs
+                cmd.add(ABBREV_BLAME);
+                if (revision != null) {
+                    cmd.add(revision);
+                }
+                cmd.add("--");
+                cmd.add(origpath);
+
+                exec = new Executor(cmd, directory);
+                status = exec.exec();
+                if (status != 0) {
+                    LOGGER.log(Level.SEVERE, "Failed to get blame details for modified file path");
+                }
+
+            }
+
+        }
         if (status != 0) {
             LOGGER.log(Level.WARNING,
                     "Failed to get annotations for: \"{0}\" Exit code: {1}",
