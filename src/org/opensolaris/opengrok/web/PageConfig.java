@@ -57,6 +57,7 @@ import org.opensolaris.opengrok.authorization.AuthorizationFramework;
 import org.opensolaris.opengrok.configuration.Group;
 import org.opensolaris.opengrok.configuration.Project;
 import org.opensolaris.opengrok.configuration.RuntimeEnvironment;
+import org.opensolaris.opengrok.configuration.messages.Message;
 import org.opensolaris.opengrok.history.Annotation;
 import org.opensolaris.opengrok.history.HistoryGuru;
 import org.opensolaris.opengrok.index.IgnoredNames;
@@ -139,7 +140,15 @@ public final class PageConfig {
      */
     public Object getRequestAttribute(String attr) {
         return this.req.getAttribute(attr);
-    }    
+    }  
+    
+    /**
+     * Removes an attribute from the current request
+     * @param string the attribute 
+     */
+    public void removeAttribute(String string) {
+        req.removeAttribute(string);
+    }
     
     /**
      * Add the given data to the &lt;head&gt; section of the html page to
@@ -512,18 +521,8 @@ public final class PageConfig {
                     .setPath(req.getParameter(QueryBuilder.PATH))
                     .setHist(req.getParameter(QueryBuilder.HIST))
                     .setType(req.getParameter(QueryBuilder.TYPE));
-
-            // This is for backward compatibility with links created by OpenGrok
-            // 0.8.x and earlier. We used to concatenate the entire query into a
-            // single string and send it in the t parameter. If we get such a
-            // link, just add it to the freetext field, and we'll get the old
-            // behaviour. We can probably remove this code in the first feature
-            // release after 0.9.
-            String t = req.getParameter("t");
-            if (t != null) {
-                queryBuilder.setFreetext(t);
-            }
         }
+
         return queryBuilder;
     }
 
@@ -1264,13 +1263,13 @@ public final class PageConfig {
         if (cfg == null) {
             return;
         }
+        ProjectHelper.cleanup(cfg);
         sr.removeAttribute(ATTR_NAME);
         cfg.env = null;
         cfg.req = null;
         if (cfg.eftarReader != null) {
             cfg.eftarReader.close();
         }
-        ProjectHelper.cleanup();
     }
     
     /**
@@ -1290,6 +1289,14 @@ public final class PageConfig {
     public boolean isAllowed(Group g) {
         return this.authFramework.isAllowed(this.req, g);
     }
-    
 
+    
+    public SortedSet<Message> getMessages() {
+        return env.getMessages();
+    }
+    
+    public SortedSet<Message> getMessages(String tag) {
+        return env.getMessages(tag);
+    }
+    
 }

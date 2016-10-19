@@ -21,7 +21,8 @@ CDDL HEADER END
 Copyright (c) 2005, 2016, Oracle and/or its affiliates. All rights reserved.
 Portions Copyright 2011 Jens Elkner.
 
---%><%@page session="false" errorPage="error.jsp" import="
+--%>
+<%@page session="false" errorPage="error.jsp" import="
 org.opensolaris.opengrok.search.Results,
 org.opensolaris.opengrok.web.SearchHelper,
 org.opensolaris.opengrok.web.SortOrder,
@@ -68,8 +69,9 @@ include file="projects.jspf"
     
     long starttime = System.currentTimeMillis();
 
-    SearchHelper searchHelper = cfg.prepareSearch()
-        .prepareExec(cfg.getRequestedProjects()).executeQuery().prepareSummary();
+    SearchHelper searchHelper = cfg.prepareSearch();
+    request.setAttribute("SearchHelper", searchHelper);
+    searchHelper.prepareExec(cfg.getRequestedProjects()).executeQuery().prepareSummary();
     if (searchHelper.redirect != null) {
         response.sendRedirect(searchHelper.redirect);
     }
@@ -120,7 +122,8 @@ include file="menu.jspf"
 %>
         </div>
     </div>
-    <div id="results"><%
+
+    <div id="results"> <%
     // TODO spellchecking cycle below is not that great and we only create
     // suggest links for every token in query, not for a query as whole
     if (searchHelper.errorMsg != null) {
@@ -244,7 +247,7 @@ include file="menu.jspf"
         %>
     </div><%
     }
-    searchHelper.destroy();
+    // Note that searchHelper.destroy() is called via WebappListener.requestDestroyed().
 }
 /* ---------------------- search.jsp end --------------------- */
 %><%@

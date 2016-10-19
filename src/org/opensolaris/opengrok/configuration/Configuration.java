@@ -81,6 +81,7 @@ public final class Configuration {
      */
     private boolean historyCacheInDB;
 
+    private int messageLimit;
     private String pluginDirectory;
     private List<Project> projects;
     private Set<Group> groups;
@@ -134,6 +135,7 @@ public final class Configuration {
     private final Map<String, String> cmds;
     private int tabSize;
     private int command_timeout; // in seconds
+    private int indexRefreshPeriod; // in seconds
     private boolean scopesEnabled;
     private boolean foldingEnabled;
 
@@ -225,6 +227,14 @@ public final class Configuration {
         this.command_timeout = timeout;
     }
 
+    public int getIndexRefreshPeriod() {
+        return indexRefreshPeriod;
+    }
+
+    public void setIndexRefreshPeriod(int seconds) {
+        this.indexRefreshPeriod = seconds;
+    }
+
     /**
      * Creates a new instance of Configuration
      */
@@ -275,6 +285,8 @@ public final class Configuration {
         setRevisionMessageCollapseThreshold(200);
         setPluginDirectory(null);
         setMaxSearchThreadCount(2 * Runtime.getRuntime().availableProcessors());
+        setIndexRefreshPeriod(60);
+        setMessageLimit(500);
     }
 
     public String getRepoCmd(String clazzName) {
@@ -294,6 +306,24 @@ public final class Configuration {
     // just to satisfy bean/de|encoder stuff
     public Map<String, String> getCmds() {
         return Collections.unmodifiableMap(cmds);
+    }
+
+    /**
+     * @see RuntimeEnvironment#getMessagesInTheSystem()
+     *
+     * @return int the current message limit
+     */
+    public int getMessageLimit() {
+        return messageLimit;
+    }
+
+    /**
+     * @see RuntimeEnvironment#getMessagesInTheSystem()
+     *
+     * @param limit the limit
+     */
+    public void setMessageLimit(int limit) {
+        this.messageLimit = limit;
     }
 
     public String getPluginDirectory() {

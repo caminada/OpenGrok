@@ -22,7 +22,10 @@ Copyright (c) 2007, 2016, Oracle and/or its affiliates. All rights reserved.
 
 Portions Copyright 2011 Jens Elkner.
 
---%><%@page import="java.util.TreeSet"%>
+--%><%@page import="org.json.simple.JSONArray"%>
+<%@page import="org.opensolaris.opengrok.configuration.RuntimeEnvironment"%>
+<%@page import="org.opensolaris.opengrok.configuration.messages.Message"%>
+<%@page import="java.util.TreeSet"%>
 <%@page import="java.util.Set"%>
 <%@page import="java.util.LinkedList"%>
 <%@page import="org.opensolaris.opengrok.configuration.Group"%>
@@ -52,7 +55,7 @@ org.opensolaris.opengrok.web.Util"
         projects = new TreeSet<>();
     }
     int projectsSize = ph.getAllUngrouped().size();
-    if(ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0)
+    if (ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0)
         projectsSize++;
     for (Group group : ph.getGroups()) {
         projectsSize++;
@@ -66,20 +69,9 @@ org.opensolaris.opengrok.web.Util"
             String esc = Util.formQuoteEscape(p.getDescription());
             pMap.put(name, esc);
         }
-        StringBuilder jsProjects = new StringBuilder(64);
-        jsProjects.append('\'');
-        for (String name : cfg.getRequestedProjects()) {
-            jsProjects.append(name).append("','");
-        }
-        if (jsProjects.length() > 1) {
-            jsProjects.setLength(jsProjects.length()-2);
-        } else {
-            jsProjects.setLength(0);
-        }
 %>
 <script type="text/javascript">/* <![CDATA[ */
-    document.projects = [ <%= Util.encode(jsProjects.toString())
-    %> ];document.xrefPath = '<%= request.getContextPath() + Prefix.XREF_P
+    document.xrefPath = '<%= request.getContextPath() + Prefix.XREF_P
     %>';document.domReady.push(function() { domReadyMenu(); });
 /* ]]> */
 </script><%
@@ -165,8 +157,13 @@ org.opensolaris.opengrok.web.Util"
 %>
 --%>
 </table>
+<div id="form-controls">
+    <input tabindex="9" class="submit" type="submit" value="Search"/>
+    <input tabindex="10" class="submit" onclick="javascript: clearSearchFrom();"
+           type="button" value="Clear"/>
+    <a href="help.jsp" target="_blank" class="help btn" title="Help" tabindex="11" />Help</a>
+</div>
 </div><%
-
     if (projects.size() != 0) {
 %>
 <div id="ptbl">
@@ -194,13 +191,17 @@ org.opensolaris.opengrok.web.Util"
                     if (pRequested.contains(p.getDescription())) {
                         %> selected="selected"<%
                     }
+                    JSONArray messages = Util.messagesToJson(p.getDescription());
+                    if (!messages.isEmpty()) {
+                    %> data-messages='<%= messages %>' <%
+                        }
                     %>><%= Util.formQuoteEscape(p.getDescription()) %></option><%
                 }
                 %></optgroup><%
             }
         }
   
-        if(ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0) {
+        if (ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0) {
             %><optgroup label="Other"><%
         }
         for ( Project p : ph.getAllUngrouped()) {
@@ -208,9 +209,13 @@ org.opensolaris.opengrok.web.Util"
             if (pRequested.contains(p.getDescription())) {
                 %> selected="selected"<%
             }
+            JSONArray messages = Util.messagesToJson(p.getDescription());
+            if (!messages.isEmpty()) {
+                %> data-messages='<%= messages %>' <%
+            }
             %>><%= Util.formQuoteEscape(p.getDescription()) %></option><%
         }
-        if(ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0) {
+        if (ph.getGroups().size() > 0 && ph.getAllUngrouped().size() > 0) {
             %></optgroup><%
         }
 
@@ -222,16 +227,8 @@ org.opensolaris.opengrok.web.Util"
 <div id="ltbl">
     <!-- filled with javascript -->
 </div>
-    <div class="clearfix"></div>
-    <p><input tabindex="9" class="submit" type="submit" value="Search"/>
-    <input tabindex="10" class="submit" onclick="javascript: clearSearchFrom();"
-	   type="button" value=" Clear "/>
-    <button class="help" tabindex="11" onclick="window.open('help.jsp');">Help
-    </button>
-    </p>
 </form>
-    
-    <div class="clearfix"></div>
+<div class="clearfix"></div>
 <%
 }
 /* ---------------------- menu.jspf end --------------------- */

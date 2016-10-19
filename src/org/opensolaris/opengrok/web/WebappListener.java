@@ -114,6 +114,9 @@ public final class WebappListener
         if (pluginDirectory != null && watchDog != null && Boolean.parseBoolean(watchDog)) {
             RuntimeEnvironment.getInstance().startWatchDogService(new File(pluginDirectory));
         }
+
+        RuntimeEnvironment.getInstance().startIndexReopenThread();
+        RuntimeEnvironment.getInstance().startExpirationTimer();
     }
 
     /**
@@ -123,6 +126,8 @@ public final class WebappListener
     public void contextDestroyed(final ServletContextEvent servletContextEvent) {
         RuntimeEnvironment.getInstance().stopConfigurationListenerThread();
         RuntimeEnvironment.getInstance().stopWatchDogService();
+        RuntimeEnvironment.getInstance().stopIndexReopenThread();
+        RuntimeEnvironment.getInstance().stopExpirationTimer();
     }
 
     /**
@@ -131,6 +136,10 @@ public final class WebappListener
     @Override
     public void requestDestroyed(ServletRequestEvent e) {
         PageConfig.cleanup(e.getServletRequest());
+        SearchHelper sh = (SearchHelper) e.getServletRequest().getAttribute("SearchHelper");
+        if (sh != null) {
+            sh.destroy();
+        }
     }
 
     /**

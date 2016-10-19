@@ -142,6 +142,7 @@
             maxHeight: undefined,
             converter: undefined,
             asyncBatchSize: 300,
+            searchTimeout: 300,
             maxShow: 0
         },
 
@@ -278,7 +279,7 @@
                 .keydown(function (e) {
                     if (e.keyCode == 13) {
                         var concat = '';
-                        $("#sbox #qtbl input").each(function () {
+                        $("#sbox #qtbl input[type='text']").each(function () {
                             concat += $.trim($(this).val());
                         });
                         if (e.keyCode == 13 && concat === '') {
@@ -287,22 +288,22 @@
                                 window.location = document.xrefPath + '/' + self.$input.val();
                                 return false;
                             }
-                            var $el = $(".keyboard-selection").first()
+                            var $el = $(".keyboard-selection").first().find(".sol-checkbox")
                             // follow the actual project
-                            if($el.length) {
+                            if($el.length && $el.data('sol-item') &&
+                                    $el.data('sol-item').label) {
                                 window.location = document.xrefPath + 
                                                     '/' + 
-                                                    $el.find(".sol-label-text").text();
+                                                    $el.data('sol-item').label;
                                 return false;
                             }
                             // follow first selected project
-                            $el = $(".sol-selected-display-item-text").first()
-                            if($el.length) {
-                                window.location = document.xrefPath + '/' + $el.text();
+                            $el = $(".sol-selected-display-item").first()
+                            if($el.length && $el.data('label')) {
+                               window.location = document.xrefPath + '/' + $el.data('label');
                                 return false;
                             }
                             return false;
-                        } else if (e.keyCode == 13) {
                         }
                         return true;
                     }
@@ -454,7 +455,13 @@
                         valueChanged = e.originalEvent.propertyName.toLowerCase()=='value';
                     }
                     if (valueChanged) {
-                        self._applySearchTermFilter();
+                        if ($(this).data('timeout')) {
+                            clearTimeout($(this).data('timeout'));
+                        }
+                        $(this).data('timeout', setTimeout(function () {
+                            self._applySearchTermFilter();
+                        }, self.config.searchTimeout))
+
                     }
                 });
 
@@ -586,30 +593,49 @@
                 return;
             }
 
-            var self = this;
+            var self = this,
+                    amountOfUnfilteredItems = dataArray.length
 
             // reset keyboard navigation mode when applying new filter
             this._setKeyBoardNavigationMode(false);
 
-            $.each(dataArray, function (index, item) {
+            /*
+             * Modified 2016
+             * recursion was very slow (however good lookin')
+             */
+            for (var itemIndex = 0; itemIndex < dataArray.length; itemIndex++) {
+                var item = dataArray[itemIndex];
                 if (item.type === 'option') {
                     var $element = item.displayElement,
-                        elementSearchableTerms = (item.label + ' ' + item.tooltip).trim().toLowerCase();
+                            elementSearchableTerms = (item.label + ' ' + item.tooltip).trim().toLowerCase();
 
                     if (elementSearchableTerms.indexOf(searchTerm) === -1) {
                         $element.addClass('sol-filtered-search');
+                        amountOfUnfilteredItems--;
                     }
                 } else {
-                    self._findTerms(item.children, searchTerm);
-                    var amountOfUnfilteredChildren = item.displayElement.find('.sol-option:not(.sol-filtered-search)');
+                    var amountOfUnfilteredChildren = item.children.length
+                    for (var childrenIndex = 0; childrenIndex < item.children.length; childrenIndex++) {
+                        var child = item.children[childrenIndex];
+                        if (child.type === 'option') {
+                            var $element = child.displayElement,
+                                    elementSearchableTerms = (child.label + ' ' + child.tooltip).trim().toLowerCase();
 
-                    if (amountOfUnfilteredChildren.length === 0) {
+                            if (elementSearchableTerms.indexOf(searchTerm) === -1) {
+                                $element.addClass('sol-filtered-search');
+                                amountOfUnfilteredChildren--;
+                            }
+                        }
+                    }
+
+                    if (amountOfUnfilteredChildren === 0) {
                         item.displayElement.addClass('sol-filtered-search');
+                        amountOfUnfilteredItems--;
                     }
                 }
-            });
+            }
 
-            this._setNoResultsItemVisible(this.$selectionContainer.find('.sol-option:not(.sol-filtered-search)').length === 0);
+            this._setNoResultsItemVisible(amountOfUnfilteredItems === 0);
         },
 
         _initializeData: function () {
@@ -787,12 +813,28 @@
             var self = this,
                 $actualTargetContainer = $optionalTargetContainer || this.$selection,
                 $inputElement,
+               /*
+                * Modified 2016
+                */
                 $labelText = $('<div class="sol-label-text"/>')
-                    .html(solOption.label.trim().length === 0 ? '&nbsp;' : solOption.label)
+                        .html(solOption.label.trim().length === 0 ? '&nbsp;' : solOption.label)
                     .addClass(solOption.cssClass),
                 $label,
                 $displayElement,
                 inputName = this._getNameAttribute();
+            /*
+             * Modified 2016
+             */
+            var data = $(solOption.element).data('messages');
+            if (data && data.length) {
+                $labelText.append(
+                        $('<span>')
+                        .addClass('pull-right important-note important-note-rounded')
+                        .data("messages", data)
+                        .attr('data-messages', '')
+                        .text('!')
+                        );
+            }
 
             if (this.config.multiple) {
                 // use checkboxes
@@ -848,10 +890,17 @@
              * Modified 2016
              */
             $displayElement = $('<div class="sol-option"/>').dblclick(function (e) {
-                // go first project
-                window.location = document.xrefPath + '/' + $(this).text();
+                var $el = $(this).find('.sol-checkbox');
+                if ($el.length && $el.data('sol-item') && $el.data('sol-item').label) {
+                    // go first project
+                    window.location = document.xrefPath + '/' + $(this).find('.sol-checkbox').data('sol-item').label;
+                }
             }).append($label);
-            
+            /*
+             * Modified 2016
+             */
+            $inputElement.data('messages-available', data && data.length);
+
             solOption.displayElement = $displayElement;
 
             $actualTargetContainer.append($displayElement);
@@ -969,11 +1018,18 @@
                  * Modified 2016
                  */
                 var selected = this.$showSelectionContainer.children('.sol-selected-display-item');
-                
-                $displayItemText = $('<span class="sol-selected-display-item-text" />').html(solOptionItem.label);
+                var label = solOptionItem.label
+                if ($changedItem.data('messages-available')) {
+                    label += ' <span class="important-note important-note-rounded" ';
+                    label += 'title="Some message is important in this project.';
+                    label += ' Find more info in the project list below.">!</span>'
+                }
+
+                $displayItemText = $('<span class="sol-selected-display-item-text" />').html(label);
                 $existingDisplayItem = $('<div class="sol-selected-display-item"/>')
                     .append($displayItemText)
                     .attr('title', solOptionItem.tooltip)
+                    .data('label', solOptionItem.label)
                     .appendTo(this.$showSelectionContainer);
 
                 // show remove button on display items if not disabled and null selection allowed
@@ -1116,7 +1172,7 @@
                             .prop('checked', true)
                             .trigger('change', true);
 
-                this.options.closeOnClick && this.close();
+                this.config.closeOnClick && this.close();
 
                 if ($.isFunction(this.config.events.onChange)) {
                     this.config.events.onChange.call(this, this, $changedInputs);
@@ -1138,7 +1194,7 @@
                 $closedInputs.prop('checked', true)
                              .trigger('change', true)
 
-                this.options.closeOnClick && this.close();
+                this.config.closeOnClick && this.close();
 
                 if ($.isFunction(this.config.events.onChange)) {
                     this.config.events.onChange.call(this, this, $openedInputs.add($closedInputs));

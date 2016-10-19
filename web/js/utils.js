@@ -346,6 +346,183 @@
 }) (window, window.jQuery);
 
 /**
+ * General on-demand script downloader
+ */
+(function (window, document, $) {
+    var script = function () {
+        var self = this
+        this.scriptsDownloaded = {};
+        this.defaults = {
+            contextPath: window.contextPath,
+        }
+
+        this.options = $.extend(this.defaults, {});
+
+        this.loadScript = function (url) {
+            if (!/^[a-z]{3,5}:\/\//.test(url)) { // dummy test for remote prefix
+                url = this.options.contextPath + '/' + url
+            }
+            if (url in this.scriptsDownloaded) {
+                return this.scriptsDownloaded[url]
+            }
+            return this.scriptsDownloaded[url] = $.ajax({
+                url: url,
+                dataType: 'script',
+                cache: true,
+                timeout: 10000
+            }).fail(function () {
+                console.debug('Failed to download "' + url + '" module')
+            });
+        }
+    };
+    $.script = new ($.extend(script, $.script ? $.script : {}));
+})(window, document, jQuery);
+
+/**
+ * General window
+ */
+(function (window, document, $) {
+    var window = function () {
+        var inner = function (options) {
+            var self = this
+            // private
+            this.initialized = false
+            this.$window = undefined
+            this.$errors = undefined
+            this.active = false
+            this.clientX = 0
+            this.clientY = 0
+            // public
+            this.defaults = {
+                title: 'Window',
+                appendDraggable: '#content',
+                draggable: true,
+                draggableScript: 'js/jquery-ui-1.12.0-draggable.min.js', // relative to context
+                contextPath: window.contextPath,
+            }
+            this.options = $.extend({}, self.defaults, options);
+            // private
+            this.determinePosition = function () {
+                var position = {}
+                var $w = this.$window;
+                if (this.clientY + $(window).scrollTop() + $w.height() + 40 > $(window).height()) {
+                    position.top = $(window).height() - $w.height() - 40;
+                } else {
+                    position.top = this.clientY + $(window).scrollTop()
+                }
+                if (this.clientX + $w.width() + 40 > $(window).width()) {
+                    position.left = $(window).width() - $w.width() - 40;
+                } else {
+                    position.left = this.clientX;
+                }
+                return position;
+            }
+
+            this.makeMeDraggable = function () {
+                $.script.loadScript(this.options.draggableScript).done(function () {
+                    self.$window.draggable({
+                        appendTo: self.options.draggableAppendTo || $('body'),
+                        helper: 'clone',
+                        start: function () {
+                            $(this).hide();
+                        },
+                        stop: function (e, ui) {
+                            $(this).show().offset(ui.offset).css('position', 'fixed');
+                        },
+                        create: function (e, ui) {
+                            $(this).css('position', 'fixed');
+                        }
+                    });
+                });
+            }
+
+            this.registerHandlers = function () {
+                $(document).mousemove(function (e) {
+                    self.clientX = e.clientX;
+                    self.clientY = e.clientY;
+                    //console.log(self.clientX, self.clientY)
+                })
+                $(document).keyup(function (e) {
+                    var key = e.keyCode
+                    switch (key) {
+                        case 27: // esc
+                            self.$window.hide();
+                            break;
+                        default:
+                    }
+                    return true;
+                });
+            }
+
+            this.createWindow = function () {
+                var $window, $top, $close, $controls
+
+                $top = $("<div>").addClass('clearfix')
+                        .append($("<div>").addClass("pull-left").append($("<b>").text(this.options.title || "Window")))
+                        .append($close = $("<a href=\"#\" class=\"pull-right minimize\">x</a>"))
+
+                $controls = $('<div>')
+                        .addClass('clearfix')
+                        .append(self.$errors = $('<div>').css('text-align', 'center'))
+
+                $window = $("<div>")
+                        .addClass('window')
+                        .addClass('diff_navigation_style')
+                        .css('z-index', 15000)
+                        .hide()
+                        .append($top)
+                        .append($("<hr>"))
+                        .append($controls)
+
+                $close.click(function () {
+                    $window.toggle()
+                    return false;
+                });
+
+                return $window;
+            }
+
+            // main
+            this.$window = this.$window || this.createWindow()
+            this.registerHandlers()
+
+            if (this.options.draggable && this.options.contextPath) {
+                this.makeMeDraggable()
+            }
+
+            this.$window.error = function (msg) {
+                var $span = $("<p class='error'>" + msg + "</p>")
+                        .animate({opacity: "0.2"}, 3000)
+                $span.hide('slow', function () {
+                    $span.remove();
+                });
+                self.$errors.html($span)
+            }
+
+            this.$window.move = function (position) {
+                position = position || self.determinePosition()
+                return this.css(position)
+            };
+
+            this.$window.toggleAndMove = function () {
+                return this.toggle().move()
+            }
+
+            this.$window.isActive = function () {
+                return self.active
+            }
+
+            return this.$window;
+        };
+
+        this.create = function (options) {
+            return new inner(options)
+        }
+    };
+    $.window = new ($.extend(window, $.window ? $.window : {}));
+})(window, document, jQuery);
+
+/**
  * Intelligence window plugin.
  * 
  * Reworked to use Jquery in 2016
@@ -356,7 +533,6 @@
             // private
             initialized: false,
             $window: undefined,
-            $errors: undefined,
             symbol: undefined,
             contextPath: undefined,
             project: undefined,
@@ -370,13 +546,12 @@
             $search_google: undefined,
             // public
             defaults: {
+                title: 'Intelligence window',
                 parent: undefined,
                 draggable: true,
-                appendDraggable: '#content',
-                draggableScript: 'js/jquery-ui-1.12.0-draggable.min.js', // relative to context
                 selector: 'a.intelliWindow-symbol',
                 google_url: 'https://www.google.com/search?q=',
-                contextPath: undefined,
+                contextPath: window.contextPath,
                 project: undefined,
             },
             options: {},
@@ -405,7 +580,7 @@
                 inner.$search_google.attr('href', inner.options.google_url + inner.symbol)
             },
             getSearchLink: function (query) {
-                return inner.contextPath + '/search?' + query + '=' + inner.symbol + '&project=' + inner.project;
+                return inner.options.contextPath + '/search?' + query + '=' + inner.symbol + '&project=' + inner.project;
             },
             getSymbolDescription: function (place) {
                 switch (place) {
@@ -470,10 +645,10 @@
                         $el = inner.getSymbols().slice(indexOfCurrent + 1);
                         if ($highlighted.length) {
                             $el = $el.filter('.symbol-highlighted')
-                            if (!$el.length) {
-                                inner.error("This is the last occurence!")
-                                return;
-                            }
+                        }
+                        if (!$el.length) {
+                            inner.$window.error("This is the last occurence!")
+                            return;
                         }
                         $el = $el.first();
                         break;
@@ -481,28 +656,20 @@
                         $el = inner.getSymbols().slice(0, indexOfCurrent);
                         if ($highlighted.length) {
                             $el = $el.filter('.symbol-highlighted')
-                            if (!$el.length) {
-                                inner.error("This is the first occurence!")
-                                return;
-                            }
+                        }
+                        if (!$el.length) {
+                            inner.$window.error("This is the first occurence!")
+                            return;
                         }
                         $el = $el.last();
                         break;
                     default:
-                        inner.error("Uknown direction")
+                        inner.$window.error("Uknown direction")
                         return;
                 }
 
                 inner.scrollTop($el)
                 inner.changeSymbol($el)
-            },
-            error: function (msg) {
-                var $span = $("<p class='error'>" + msg + "</p>")
-                        .animate({opacity: "0.2"}, 3000)
-                $span.hide('slow', function () {
-                    $span.remove();
-                });
-                inner.$errors.html($span)
             },
             toggle: function () {
                 return inner.$window.toggle();
@@ -513,33 +680,13 @@
             show: function () {
                 return inner.$window.show();
             },
-            determinePosition: function () {
-                var position = {}
-                var $w = inner.$window;
-                if (inner.clientY + $w.height() + 40 > $(window).height()) {
-                    position.top = $(window).height() - $w.height() - 40;
-                } else {
-                    position.top = inner.clientY;
-                }
-                if (inner.clientX + $w.width() + 40 > $(window).width()) {
-                    position.left = $(window).width() - $w.width() - 40;
-                } else {
-                    position.left = inner.clientX;
-                }
-                return position;
-            },
             registerHandlers: function () {
-                $(document).mousemove(function (e) {
-                    inner.clientX = e.clientX;
-                    inner.clientY = e.clientY;
-                })
                 $(document).keypress(function (e) {
                     var key = e.which
                     switch (key) {
                         case 49: // 1
                             if (inner.symbol) {
-                                var position = inner.determinePosition()
-                                inner.toggle().offset(position)
+                                inner.$window.toggleAndMove()
                             }
                             break;
                         case 50: // 2
@@ -560,16 +707,6 @@
                     }
                     return true;
                 });
-                $(document).keyup(function (e) {
-                    var key = e.keyCode
-                    switch (key) {
-                        case 27: // esc
-                            inner.hide();
-                            break;
-                        default:
-                    }
-                    return true;
-                });
                 inner.getSymbols().mouseover(function () {
                     inner.changeSymbol($(this));
                 });
@@ -581,11 +718,8 @@
                     return false;
                 })
             },
-            createWindow: function () {
-                var $close, $highlight, $unhighlight, $unhighlighAll, $prev, $next
-                var $top = $("<div>").addClass('clearfix')
-                        .append($("<div>").addClass("pull-left").append($("<b>").text("Intelligence Window")))
-                        .append($close = $("<a href=\"#\" class=\"pull-right minimize\">x</a>"))
+            apply: function ($window) {
+                var $highlight, $unhighlight, $unhighlighAll, $prev, $next
 
                 var $firstList = $("<ul>")
                         .append($("<li>").append(
@@ -598,7 +732,6 @@
                                 $unhighlighAll = $("<a href=\"#\" title=\"Unhighlight all\">" +
                                         "<span>Unhighlight all</span></a>")))
 
-                inner.bindOnClick($close, inner.toggle);
                 inner.bindOnClick($highlight, inner.highlight)
                 inner.bindOnClick($unhighlight, inner.unhighlight)
                 inner.bindOnClick($unhighlighAll, inner.unhighlightAll);
@@ -632,13 +765,9 @@
                 inner.bindOnClick($next, inner.scrollToNextElement, 1);
                 inner.bindOnClick($prev, inner.scrollToNextElement, -1);
 
-                return $("<div>")
+                return $window
                         .attr('id', 'intelli_win')
                         .addClass('intelli-window')
-                        .addClass('diff_navigation_style')
-                        .hide()
-                        .append($top)
-                        .append($("<hr>"))
                         .append($controls)
                         .append($("<h2>").addClass('symbol-name'))
                         .append($("<span>").addClass('symbol-description'))
@@ -655,36 +784,12 @@
                     return
                 }
                 inner.initialized = true
-                inner.contextPath = inner.options.contextPath || $("#contextpath").val();
                 inner.project = inner.options.project || $("input[name='project']").val();
 
-                inner.$window = inner.$window || inner.createWindow()
+                inner.$window = inner.$window || $.window.create(inner.options)
+                inner.$window = inner.apply(inner.$window)
                 inner.$window.appendTo(inner.parent ? $(inner.parent) : $("#content"));
                 inner.registerHandlers()
-
-                if (inner.options.draggable && inner.contextPath) {
-                    $.ajax({
-                        url: inner.contextPath + '/' + inner.options.draggableScript,
-                        dataType: 'script',
-                        cache: true
-                    }).done(function () {
-                        inner.$window.draggable({
-                            appendTo: inner.options.draggableAppendTo,
-                            helper: 'clone',
-                            start: function () {
-                                $(this).hide();
-                            },
-                            stop: function (e, ui) {
-                                $(this).show().offset(ui.offset).css('position', 'fixed');
-                            },
-                            create: function (e, ui) {
-                                $(this).css('position', 'fixed');
-                            }
-                        });
-                    }).fail(function () {
-                        console.log('Failed to download draggable module')
-                    });
-                }
             }
         };
 
@@ -696,37 +801,107 @@
     $.intelliWindow = new ($.extend(intelliWindow, $.intelliWindow ? $.intelliWindow : {}));
 })(window, document, jQuery);
 
-$(document).ready(function () {
-    $("#content").scroll(scope_on_scroll);
-    $("#dirlist").tablesorter({
-        sortList: [[0, 0]],
-        cancelSelection: true,
-        headers: {
-            1: {
-                sorter: 'text'
+/**
+ * Messages window plugin.
+ *
+ * @author Kryštof Tulinger
+ */
+(function (window, document, $) {
+    var messagesWindow = function () {
+        var inner = {
+            // private
+            initialized: false,
+            $window: undefined,
+            $messages: $(),
+            // public
+            defaults: {
+                title: 'Messages Window',
+                parent: undefined,
+                draggable: false,
+                contextPath: window.contextPath,
             },
-            3: {
-                sorter: 'dates'
+            options: {},
+            // private
+            registerHandlers: function () {
+                inner.$window.mouseenter(function () {
+                    inner.$window.show()
+                }).mouseleave(function () {
+                    inner.$window.hide()
+                })
             },
-            4: {
-                sorter: 'groksizes'
+            apply: function ($window) {
+                return $window
+                        .attr('id', 'messages_win')
+                        .addClass('messages-window')
+                        .addClass('diff_navigation_style')
+                        .css({top: '150px', right: '20px'})
+                        //.append($("<h5>").text("System messages"))
+                        .append(inner.$messages = $("<div>"))
+            },
+            init: function () {
+                if (inner.initialized) {
+                    return
+                }
+                inner.initialized = true
+
+                inner.$window = inner.$window || $.window.create(inner.options)
+                inner.$window = inner.apply(inner.$window)
+                inner.$window.appendTo(inner.parent ? $(inner.parent) : $("body"));
+                inner.registerHandlers()
+            }
+        };
+
+        this.toggle = function () {
+            return inner.$window.toggle().move()
+        }
+
+        this.hide = function () {
+            return inner.$window.hide();
+        }
+
+        this.update = function (data) {
+            inner.$messages.empty()
+            for (var i = 0; i < data.length; i++) {
+                var tag = data[i]
+                if (!tag || tag.messages.length === 0) {
+                    continue;
+                }
+                inner.$messages.append($("<h5>")
+                        .addClass('message-group-caption')
+                        .text(tag.tag.charAt(0).toUpperCase() + tag.tag.slice(1)))
+                var $ul = $("<ul>").addClass('message-group limited');
+                for (var j = 0; j < tag.messages.length; j++) {
+                    if (!tag.messages[j]) {
+                        continue;
+                    }
+                    $ul.append(
+                            $('<li>')
+                            .addClass('message-group-item')
+                            .addClass(tag.messages[j].class)
+                            .attr('title', 'Expires on ' + tag.messages[j].expiration)
+                            .html(tag.messages[j].created + ': ' + tag.messages[j].text)
+                            )
+                }
+                inner.$messages.append($ul);
             }
         }
-    });
-    
-    // intelligence window plugin
-    $("#contextpath").each(function() {
-        $.intelliWindow.init();
-        return false
-    })
 
-    // starting spaces plugin
-    $.spaces.init()
-    
-    $.hash.init({parent: "pre"})
+        this.show = function () {
+            return inner.$window.show().move()
+        }
 
+        this.init = function (options) {
+            inner.options = $.extend({}, inner.defaults, options);
+            inner.init();
+        }
+    };
+    $.messagesWindow = new ($.extend(messagesWindow, $.messagesWindow ? $.messagesWindow : {}));
+})(window, document, jQuery);
+
+function init_results_autohide() {
     $("#sbox input[type='submit']").click(function (e) {
         $("#footer").not(".main_page").hide(); // footer
+        $("#results > .message-group").hide(); // messages
         $("#results > p.suggestions").hide(); // suggestions
         $("#results > p.pagetitle").hide(); // description
         $("#results > p.slider").hide(); // pagination
@@ -734,7 +909,9 @@ $(document).ready(function () {
         $("#results > table, #results > ul").hide(); // results + empty
         $("#results > table + p, #results > ul + p").hide(); // results + empty timing
     })
+}
 
+function init_searchable_option_list() {
     var searchableOptionListOptions = {
         maxHeight: '300px',
         showSelectionBelowList: false,
@@ -742,6 +919,15 @@ $(document).ready(function () {
         maxShow: 30,
         resultsContainer: $("#ltbl"),
         events: {
+            onInitialized: function () {
+                this.$selectionContainer.find("[data-messages]").mouseenter(function () {
+                    var data = $(this).data('messages') || []
+                    $.messagesWindow.update(data)
+                    $.messagesWindow.show()
+                }).mouseleave(function (e) {
+                    $.messagesWindow.hide()
+                })
+            },
             // override the default onScroll positioning event if neccessary
             onScroll: function () {
 
@@ -772,6 +958,136 @@ $(document).ready(function () {
     };
 
     $('#project').searchableOptionList(searchableOptionListOptions);
+}
+
+function init_history_input() {
+    $('input[data-revision-path]').click(function () {
+        var $this = $(this)
+        $("a.more").each(function () {
+            $(this).attr('href', setParameter($(this).attr('href'), 'r1', $this.data('revision-1')))
+            $(this).attr('href', setParameter($(this).attr('href'), 'r2', $this.data('revision-2')))
+        })
+
+        var $revisions = $('input[data-revision-path]'),
+                index = -1;
+
+        // change the correct revision on every element
+        // (every element keeps a track which revision is selected)
+        $revisions.filter('[data-diff-revision=\'r1\']')
+                .data('revision-2', $this.data('revision-2'))
+        $revisions.filter('[data-diff-revision=\'r2\']')
+                .data('revision-1', $this.data('revision-1'))
+
+        // set the correct revision for the form submittion
+        $("#input_" + $this.data('diff-revision')).val($this.data('revision-path'))
+
+        // enable all input
+        $revisions.prop('disabled', false),
+                // uncheck all input in my column
+                $revisions.filter('[data-diff-revision=\'' + $this.data('diff-revision') + '\']').prop('checked', false)
+        // set me as checked
+        $this.prop('checked', true)
+
+        // disable from top to r2
+        index = Math.max($revisions.index($('input[data-revision-path][data-diff-revision=\'r2\']:checked')), 0)
+        $revisions.slice(0, index).filter('[data-diff-revision=\'r1\']').prop('disabled', true)
+
+        // disable from bottom to r1
+        index = Math.max($revisions.index($('input[data-revision-path][data-diff-revision=\'r1\']:checked')), index)
+        $revisions.slice(index + 1).filter('[data-diff-revision=\'r2\']').prop('disabled', true)
+    })
+}
+
+function init_tablesorter() {
+    $("#dirlist").tablesorter({
+        sortList: [[0, 0]],
+        cancelSelection: true,
+        headers: {
+            1: {
+                sorter: 'text'
+            },
+            3: {
+                sorter: 'dates'
+            },
+            4: {
+                sorter: 'groksizes'
+            }
+        }
+    });
+}
+
+$(document).ready(function () {
+    /**
+     * Initialize scope scroll event to display scope information correctly when
+     * the element comes into the viewport.
+     */
+    $("#content").scroll(scope_on_scroll);
+
+    /**
+     * Initialize table sorter on every directory listing.
+     */
+    init_tablesorter()
+
+    /**
+     * Initialize inteligence window plugin. Presence of #contextpath indicates
+     * that we use the code view.
+     */
+    $("#contextpath").each(function () {
+        $.intelliWindow.init();
+        return false
+    })
+
+    /**
+     * Initialize the messages plugin to display
+     * message onhover on every affected element.
+     */
+    $.messagesWindow.init();
+
+    /**
+     * Attaches a onhover listener to display messages for affected elements.
+     */
+    $("[data-messages]").mouseenter(function () {
+        var data = $(this).data('messages') || []
+        $.messagesWindow.update(data)
+        $.messagesWindow.show()
+    }).mouseleave(function (e) {
+        $.messagesWindow.hide()
+    })
+
+    /**
+     * Initialize spaces plugin which automaticaly inserts a single space between
+     * the line number and the following text. It strongly relies on the fact
+     * that the line numbers are stored in 'name' attribute on each line link.
+     */
+    $.spaces.init()
+
+    /**
+     * Initialize the window hash management. Mainly this allows users to select
+     * multiple lines of code and use that url to send it to somebody else.
+     */
+    $.hash.init({parent: "pre"})
+
+    /**
+     * After hitting the search button, the results or projects are temporarily hidden
+     * until the new page is loaded. That helps to distinguish if search is being in process.
+     *
+     */
+    init_results_autohide()
+
+    /**
+     * Initialize the new project picker
+     */
+    init_searchable_option_list()
+
+    /**
+     * Initialize the history input picker.
+     * Checkboxes are automaticaly covered with a click event and automaticaly
+     * colored as disabled or checked.
+     *
+     * Also works for paging where it stores the actual selected revision range in the
+     * pagination links.
+     */
+    init_history_input()
 });
 
 document.pageReady = [];
@@ -825,13 +1141,45 @@ function getParameter(p) {
     return undefined;
 }
 
+/**
+ * Set parameter in the given url.
+ * @param string url
+ * @param string p parameter name
+ * @param string v parameter value
+ * @returns string the modified url
+ */
+function setParameter(url, p, v) {
+    var base = url.substr(0, url.indexOf('?'))
+    var params = url.substr(base.length + 1).split("&").map(
+            function (x) {
+                return x.split("=");
+            });
+    var found = false;
+    for (var i in params) {
+        if (params[i][0] === p && params[i].length > 1) {
+            params[i][1] = encodeURIComponent(v);
+            found = true
+        }
+    }
+    if (!found) {
+        params.push([p, encodeURIComponent(v)])
+    }
+
+    return base + '?' + params.map(function (x) {
+        return x[0] + '=' + x[1];
+    }).join('&');
+}
+
 function domReadyMast() {
     if (!window.location.hash) {
         var h = getParameter("h");
         if (h && h !== "") {
             window.location.hash = h;
         } else {
-            $('#content').focus();
+            $("#content")
+                    .attr("tabindex", 1)
+                    .focus()
+                    .css('outline', 'none')
         }
     }
     if (document.annotate) {
@@ -886,7 +1234,6 @@ function pageReadyMast() {
 }
 
 function domReadyMenu() {
-    var projects = document.projects;
     var sbox = document.getElementById('sbox');
 /*
     $("#project").autocomplete(projects, {
@@ -920,8 +1267,6 @@ function domReadyHistory() {
     // second row: r1 clicked, (r2 hidden)(optionally)
     // I cannot say what will happen if they are not like that, togglediffs
     // will go mad !
-    $("#revisions input[type=radio]").click(togglediffs);
-    togglediffs();
     togglerevs();
 }
 
@@ -1157,36 +1502,6 @@ function toggle_revtags() {
     );
 }
 
-function togglediffs() {
-    var cr2 = false;
-    var cr1 = false;
-    $("#revisions input[type=radio]").each(
-        function() {
-            if (this.name=="r1") {
-                if (this.checked) {
-                    cr1 = true;
-                    return true;
-                }
-                if (cr2) {
-                    this.disabled = ''
-                } else {
-                    this.disabled = 'true'
-                }
-            } else if (this.name=="r2") {
-                if (this.checked) {
-                    cr2=true;
-                    return true;
-                }
-                if (!cr1) {
-                    this.disabled = ''
-                } else {
-                    this.disabled = 'true'
-                }
-            }
-        }
-    );
-}
-
 /**
  *  Function to toggle revision message length for long revision messages
  */
@@ -1237,10 +1552,13 @@ var scope_text = '';
 /**
  * Fold or unfold a function definition.
  */
-function fold(id) {        
-    var i = document.getElementById(id + "_fold_icon").children[0];
-    i.className = i.className === 'fold-icon' ? 'unfold-icon' : 'fold-icon';
-    $("#" + id + "_fold").toggle('fold');
+function fold(id) {
+    $('#' + id + '_fold_icon')
+            .children()
+            .first()
+            .toggleClass('unfold-icon')
+            .toggleClass('fold-icon')
+    $('#' + id + '_fold').toggle('fold');
 }
 
 /**
@@ -1250,22 +1568,19 @@ function fold(id) {
  */
 function scope_on_scroll() {
     var cnt = document.getElementById("content");
-    var scope_cnt = document.getElementById("scope_content");
     var y = cnt.getBoundingClientRect().top + 2;
+    var $scope_cnt_el = $('#scope_content');
+    var c = document.elementFromPoint(15, y + 1);
 
-    var c = document.elementFromPoint(15, y+1);
-    scope_cnt.innerHTML = '';
-    if (c.className === "l" || c.className === "hl") {
-        prev = c;
-        var par = c.parentNode;
-        while( par.className !== 'scope-body' && par.className !== 'scope-head' ) {
-            par = par.parentNode;
-            if (par === null) {
-                return ;
-            }
+    if ($(c).is('.l, .hl')) {
+        var $par = $(c).closest('.scope-body, .scope-head')
+
+        if (!$par.length) {
+            return;
         }
-        var head = par.className === 'scope-body' ? par.previousSibling : par;
-        var sig = head.children[0];
-        scope_cnt.innerHTML = '<a href="#' + head.id + '">' + sig.innerHTML + '</a>';
+
+        var $head = $par.hasClass('scope-body') ? $par.prev() : $par;
+        var $sig = $head.children().first()
+        $scope_cnt_el.html('<a href="#' + $head.attr('id') + '">' + $sig.html() + '</a>');
     }
 }

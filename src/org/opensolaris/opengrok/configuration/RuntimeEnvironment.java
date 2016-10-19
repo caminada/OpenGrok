@@ -18,8 +18,8 @@
  */
 
  /*
- * Copyright (c) 2006, 2016, Oracle and/or its affiliates. All rights reserved.
- */
+  * Copyright (c) 2006, 2016, Oracle and/or its affiliates. All rights reserved.
+  */
 package org.opensolaris.opengrok.configuration;
 
 import java.beans.XMLDecoder;
@@ -50,8 +50,14 @@ import java.util.Date;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.SortedSet;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.TreeMap;
 import java.util.TreeSet;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
+import java.util.concurrent.ConcurrentSkipListSet;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ThreadFactory;
@@ -59,11 +65,20 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.Collectors;
+import org.apache.lucene.index.IndexReader;
+import org.apache.lucene.index.MultiReader;
+import org.apache.lucene.search.SearcherManager;
+import org.apache.lucene.store.AlreadyClosedException;
+import org.apache.lucene.store.Directory;
+import org.apache.lucene.store.FSDirectory;
 import org.opensolaris.opengrok.authorization.AuthorizationFramework;
+import org.opensolaris.opengrok.configuration.messages.Message;
 import org.opensolaris.opengrok.history.HistoryGuru;
 import org.opensolaris.opengrok.history.RepositoryInfo;
 import org.opensolaris.opengrok.index.Filter;
 import org.opensolaris.opengrok.index.IgnoredNames;
+import org.opensolaris.opengrok.index.IndexDatabase;
 import org.opensolaris.opengrok.logger.LoggerFactory;
 import org.opensolaris.opengrok.util.Executor;
 import org.opensolaris.opengrok.util.IOUtils;
@@ -72,7 +87,6 @@ import static java.nio.file.FileVisitResult.CONTINUE;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_CREATE;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_DELETE;
 import static java.nio.file.StandardWatchEventKinds.ENTRY_MODIFY;
-
 
 /**
  * The RuntimeEnvironment class is used as a placeholder for the current
@@ -91,6 +105,17 @@ public final class RuntimeEnvironment {
 
     private final Map<Project, List<RepositoryInfo>> repository_map = new TreeMap<>();
     private final Map<Project, Set<Group>> project_group_map = new TreeMap<>();
+    private final Map<String, SearcherManager> searcherManagerMap = new ConcurrentHashMap<>();
+    
+    public static final String MESSAGES_MAIN_PAGE_TAG = "main";
+    /*
+    initial capacity - default 16
+    initial load factor - default 0.75f
+    initial concurrency level - number of concurrently updating threads (default 16)
+        - just two (the timer, configuration listener) so set it to small value
+    */
+    private final ConcurrentMap<String, SortedSet<Message>> tagMessages = new ConcurrentHashMap<>(16, 0.75f, 5);
+    private int messagesInTheSystem = 0;
 
     /* Get thread pool used for top-level repository history generation. */
     public static synchronized ExecutorService getHistoryExecutor() {
@@ -232,6 +257,14 @@ public final class RuntimeEnvironment {
         threadConfig.get().setCommandTimeout(timeout);
     }
 
+    public int getIndexRefreshPeriod() {
+        return threadConfig.get().getIndexRefreshPeriod();
+    }
+
+    public void setIndexRefreshPeriod(int seconds) {
+        threadConfig.get().setIndexRefreshPeriod(seconds);
+    }
+
     /**
      * Get the path to the where the index database is stored
      *
@@ -343,6 +376,16 @@ public final class RuntimeEnvironment {
      */
     public List<Project> getProjects() {
         return threadConfig.get().getProjects();
+    }
+
+    /**
+     * Get descriptions of all projects.
+     *
+     * @return a list containing descriptions of all projects.
+     */
+    public List<String> getProjectDescriptions() {
+        return threadConfig.get().getProjects().stream().
+            map(Project::getDescription).collect(Collectors.toList());
     }
 
     /**
@@ -1091,7 +1134,7 @@ public final class RuntimeEnvironment {
      */
     private void generateProjectRepositoriesMap() throws IOException {
         repository_map.clear();
-        for (RepositoryInfo r : configuration.getRepositories()) {
+        for (RepositoryInfo r : getRepositories()) {
             Project proj;
             String repoPath;
 
@@ -1148,26 +1191,26 @@ public final class RuntimeEnvironment {
      */
     public void setConfiguration(Configuration configuration) {
         this.configuration = configuration;
+        register();
         try {
             generateProjectRepositoriesMap();
         } catch (IOException ex) {
             LOGGER.log(Level.SEVERE, "Cannot generate project - repository map", ex);
         }
         populateGroups(getGroups(), getProjects());
-        register();
         HistoryGuru.getInstance().invalidateRepositories(
                 configuration.getRepositories());
     }
 
     public void setConfiguration(Configuration configuration, List<String> subFileList) {
         this.configuration = configuration;
+        register();
         try {
             generateProjectRepositoriesMap();
         } catch (IOException ex) {
             LOGGER.log(Level.SEVERE, "Cannot generate project - repository map", ex);
         }
         populateGroups(getGroups(), getProjects());
-        register();
         HistoryGuru.getInstance().invalidateRepositories(
                 configuration.getRepositories(), subFileList);
     }
@@ -1175,6 +1218,184 @@ public final class RuntimeEnvironment {
     public Configuration getConfiguration() {
         return this.threadConfig.get();
     }
+
+    private Timer expirationTimer;
+
+    private static SortedSet<Message> emptyMessageSet(SortedSet<Message> toRet) {
+        return toRet == null ? new TreeSet<>() : toRet;
+    }
+
+    /**
+     * Get the default set of messages for the main tag.
+     *
+     * @return set of messages
+     */
+    public SortedSet<Message> getMessages() {
+        if (expirationTimer == null) {
+            expireMessages();
+        }
+        return emptyMessageSet(tagMessages.get(MESSAGES_MAIN_PAGE_TAG));
+    }
+
+    /**
+     * Get the set of messages for the arbitrary tag
+     *
+     * @param tag the message tag
+     * @return set of messages
+     */
+    public SortedSet<Message> getMessages(String tag) {
+        if (expirationTimer == null) {
+            expireMessages();
+        }
+        return emptyMessageSet(tagMessages.get(tag));
+    }
+
+    /**
+     * Add a message to the application Also schedules a expirationTimer to
+     * remove this message after its expiration.
+     *
+     * @param m the message
+     */
+    public void addMessage(Message m) {
+        if (!canAcceptMessage(m)) {
+            return;
+        }
+
+        if (expirationTimer == null) {
+            expireMessages();
+        }
+
+        boolean added = false;
+        for (String tag : m.getTags()) {
+            if (!tagMessages.containsKey(tag)) {
+                tagMessages.put(tag, new ConcurrentSkipListSet<>());
+            }
+            if (tagMessages.get(tag).add(m)) {
+                messagesInTheSystem++;
+                added = true;
+            }
+        }
+
+        if (added) {
+            if (expirationTimer != null) {
+                expirationTimer.schedule(new TimerTask() {
+                    @Override
+                    public void run() {
+                        expireMessages();
+                    }
+                }, new Date(m.getExpiration().getTime() + 10));
+            }
+        }
+    }
+
+    /**
+     * Immediately remove all messages in the application.
+     */
+    public void removeAllMessages() {
+        tagMessages.clear();
+        messagesInTheSystem = 0;
+    }
+
+    /**
+     * Remove all messages containing at least on of the tags.
+     *
+     * @param tags set of tags
+     */
+    public void removeAnyMessage(Set<String> tags) {
+        removeAnyMessage(new Predicate<Message>() {
+            @Override
+            public boolean test(Message t) {
+                return t.hasAny(tags);
+            }
+        });
+    }
+
+    /**
+     * Remove messages which have expired.
+     */
+    private void expireMessages() {
+        removeAnyMessage(new Predicate<Message>() {
+            @Override
+            public boolean test(Message t) {
+                return t.isExpired();
+            }
+        });
+    }
+
+    /**
+     * Generic function to remove any message according to the result of the
+     * predicate.
+     *
+     * @param predicate the testing predicate
+     */
+    private void removeAnyMessage(Predicate<Message> predicate) {
+        int size;
+        for (Map.Entry<String, SortedSet<Message>> set : tagMessages.entrySet()) {
+            size = set.getValue().size();
+            set.getValue().removeIf(predicate);
+            messagesInTheSystem -= size - set.getValue().size();
+        }
+
+        tagMessages.entrySet().removeIf(new Predicate<Map.Entry<String, SortedSet<Message>>>() {
+            @Override
+            public boolean test(Map.Entry<String, SortedSet<Message>> t) {
+                return t.getValue().isEmpty();
+            }
+        });
+    }
+
+    /**
+     * Test if the application can receive this messages.
+     *
+     * @param m the message
+     * @return true if it can
+     */
+    public boolean canAcceptMessage(Message m) {
+        return messagesInTheSystem < getMessageLimit() && !m.isExpired();
+    }
+
+    /**
+     * Get the maximum number of messages in the application
+     *
+     * @see #getMessagesInTheSystem()
+     * @return the number
+     */
+    public int getMessageLimit() {
+        return threadConfig.get().getMessageLimit();
+    }
+
+    /**
+     * Set the maximum number of messages in the application
+     *
+     * @see #getMessagesInTheSystem()
+     * @param limit the new limit
+     */
+    public void setMessageLimit(int limit) {
+        threadConfig.get().setMessageLimit(limit);
+    }
+
+    /**
+     * Return number of messages present in the hash map.
+     *
+     * DISCLAIMER: This is not the real number of unique messages in the
+     * application because the same message is duplicated for all of the tags in
+     * the map.
+     *
+     * This is just a cheap counter to indicate how many messages are stored in
+     * total under different tags.
+     *
+     * Also one can bypass the counter by not calling
+     * {@link #addMessage(Message)}
+     *
+     * @return number of messages
+     */
+    public int getMessagesInTheSystem() {
+        if (expirationTimer == null) {
+            expireMessages();
+        }
+        return messagesInTheSystem;
+    }
+
     private ServerSocket configServerSocket;
 
     /**
@@ -1183,6 +1404,8 @@ public final class RuntimeEnvironment {
     public void stopConfigurationListenerThread() {
         IOUtils.close(configServerSocket);
     }
+
+    private Thread configurationListenerThread;
 
     /**
      * Start a thread to listen on a socket to receive new configurations to
@@ -1199,10 +1422,10 @@ public final class RuntimeEnvironment {
             configServerSocket.bind(endpoint);
             ret = true;
             final ServerSocket sock = configServerSocket;
-            Thread t = new Thread(new Runnable() {
+            configurationListenerThread = new Thread(new Runnable() {
                 @Override
                 public void run() {
-                    ByteArrayOutputStream bos = new ByteArrayOutputStream(1 << 13);
+                    ByteArrayOutputStream bos = new ByteArrayOutputStream(1 << 15);
                     while (!sock.isClosed()) {
                         try (Socket s = sock.accept();
                                 BufferedInputStream in = new BufferedInputStream(s.getInputStream())) {
@@ -1229,6 +1452,26 @@ public final class RuntimeEnvironment {
                                 setConfiguration((Configuration) obj);
                                 LOGGER.log(Level.INFO, "Configuration updated: {0}",
                                         configuration.getSourceRoot());
+
+                                // We are assuming that each update of configuration
+                                // means reindex. If dedicated thread is introduced
+                                // in the future solely for the purpose of getting
+                                // the event of reindex, the 2 calls below should
+                                // be moved there.
+                                refreshSearcherManagerMap();
+                                maybeRefreshIndexSearchers();
+                            } else if (obj instanceof Message) {
+                                Message m = ((Message) obj);
+                                if (canAcceptMessage(m)) {
+                                    m.apply(RuntimeEnvironment.getInstance());
+                                    LOGGER.log(Level.FINER, "Message received: {0}",
+                                            m.getTags());
+                                    LOGGER.log(Level.FINER, "Messages in the system: {0}",
+                                            getMessagesInTheSystem());
+                                } else {
+                                    LOGGER.log(Level.WARNING, "Message dropped: {0} - too many messages in the system",
+                                            m.getTags());
+                                }
                             }
                         } catch (IOException e) {
                             LOGGER.log(Level.SEVERE, "Error reading config file: ", e);
@@ -1237,12 +1480,12 @@ public final class RuntimeEnvironment {
                         }
                     }
                 }
-            }, "conigurationListener");
-            t.start();
+            }, "configurationListener");
+            configurationListenerThread.start();
         } catch (UnknownHostException ex) {
-            LOGGER.log(Level.FINE, "Problem resolving sender: ", ex);
+            LOGGER.log(Level.WARNING, "Problem resolving sender: ", ex);
         } catch (IOException ex) {
-            LOGGER.log(Level.FINE, "I/O error when waiting for config: ", ex);
+            LOGGER.log(Level.WARNING, "I/O error when waiting for config: ", ex);
         }
 
         if (!ret && configServerSocket != null) {
@@ -1342,5 +1585,181 @@ public final class RuntimeEnvironment {
                 LOGGER.log(Level.INFO, "Cannot join WatchDogService thread: ", ex);
             }
         }
+    }
+
+    public void startExpirationTimer() {
+        if (expirationTimer != null) {
+            stopExpirationTimer();
+        }
+        expirationTimer = new Timer("expirationThread");
+        expireMessages();
+    }
+
+    /**
+     * Stops the watch dog service.
+     */
+    public void stopExpirationTimer() {
+        if (expirationTimer != null) {
+            expirationTimer.cancel();
+            expirationTimer = null;
+        }
+    }
+
+    private Thread indexReopenThread;
+
+    public void maybeRefreshIndexSearchers() {
+        for (Map.Entry<String, SearcherManager> entry : searcherManagerMap.entrySet()) {
+            try {
+                entry.getValue().maybeRefresh();
+            } catch (AlreadyClosedException ex) {
+                // This is a case of removed project.
+                // See refreshSearcherManagerMap() for details.
+            } catch (IOException ex) {
+                LOGGER.log(Level.SEVERE, "maybeRefresh failed", ex);
+            }
+        }
+    }
+
+    /**
+     * Call maybeRefresh() on each SearcherManager object from dedicated thread
+     * periodically.
+     * If the corresponding index has changed in the meantime, it will be safely
+     * reopened, i.e. without impacting existing IndexSearcher/IndexReader
+     * objects, thus not disrupting searches in progress.
+     */
+    public void startIndexReopenThread() {
+        indexReopenThread = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (!Thread.currentThread().isInterrupted()) {
+                    try {
+                        maybeRefreshIndexSearchers();
+                        Thread.sleep(getIndexRefreshPeriod() * 1000);
+                    } catch (InterruptedException ex) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+        }, "indexReopenThread");
+
+        indexReopenThread.start();
+    }
+
+    public void stopIndexReopenThread() {
+        if (indexReopenThread != null) {
+            indexReopenThread.interrupt();
+            try {
+                indexReopenThread.join();
+            } catch (InterruptedException ex) {
+                LOGGER.log(Level.INFO, "Cannot join indexReopen thread: ", ex);
+            }
+        }
+    }
+
+    /**
+     * Get IndexSearcher for given project.
+     * Each IndexSearcher is born from a SearcherManager object. There is
+     * one SearcherManager for every project.
+     * This schema makes it possible to reuse IndexSearcher/IndexReader objects
+     * so the heavy lifting (esp. system calls) performed in FSDirectory
+     * and DirectoryReader happens only once for a project.
+     * The caller has to make sure that the IndexSearcher is returned back
+     * to the SearcherManager. This is done with returnIndexSearcher().
+     * The return of the IndexSearcher should happen only after the search
+     * result data are read fully.
+     *
+     * @param proj project
+     * @return SearcherManager for given project
+     */
+    public SuperIndexSearcher getIndexSearcher(String proj) throws IOException {
+        SearcherManager mgr = searcherManagerMap.get(proj);
+        SuperIndexSearcher searcher = null;
+
+        if (mgr == null) {
+            File indexDir = new File(getDataRootPath(), IndexDatabase.INDEX_DIR);
+
+            try {
+                Directory dir = FSDirectory.open(new File(indexDir, proj).toPath());
+                mgr = new SearcherManager(dir, new ThreadpoolSearcherFactory());
+                searcherManagerMap.put(proj, mgr);
+                searcher = (SuperIndexSearcher) mgr.acquire();
+                searcher.setSearcherManager(mgr);
+            } catch (IOException ex) {
+                LOGGER.log(Level.SEVERE,
+                    "cannot construct IndexSearcher for project " + proj, ex);
+            }
+        } else {
+            searcher = (SuperIndexSearcher) mgr.acquire();
+            searcher.setSearcherManager(mgr);
+        }
+
+        return searcher;
+    }
+
+    /**
+     * After new configuration is put into place, the set of projects might
+     * change so we go through the SearcherManager objects and close those where
+     * the corresponding project is no longer present.
+     */
+    private void refreshSearcherManagerMap() {
+        ArrayList<String> toRemove = new ArrayList<>();
+
+        for (Map.Entry<String, SearcherManager> entry : searcherManagerMap.entrySet()) {
+            // If a project is gone, close the corresponding SearcherManager
+            // so that it cannot produce new IndexSearcher objects.
+            if (!getProjectDescriptions().contains(entry.getKey())) {
+                try {
+                    LOGGER.log(Level.FINE,
+                        "closing SearcherManager for project" + entry.getKey());
+                    entry.getValue().close();
+                } catch (IOException ex) {
+                    LOGGER.log(Level.SEVERE,
+                        "cannot close IndexReader for project" + entry.getKey(), ex);
+                }
+                toRemove.add(entry.getKey());
+            }
+        }
+
+        for (String proj : toRemove) {
+            searcherManagerMap.remove(proj);
+        }
+    }
+
+    /**
+     * Return collection of IndexReader objects as MultiReader object
+     * for given list of projects.
+     * The caller is responsible for releasing the IndexSearcher objects
+     * so we add them to the map.
+     *
+     * @param projects list of projects
+     * @param list each SuperIndexSearcher produced will be put into this list
+     * @return MultiReader for the projects
+     */
+    public MultiReader getMultiReader(SortedSet<String> projects,
+        ArrayList<SuperIndexSearcher> searcherList) {
+
+        IndexReader[] subreaders = new IndexReader[projects.size()];
+        int ii = 0;
+
+        // TODO might need to rewrite to Project instead of
+        // String , need changes in projects.jspf too
+        for (String proj : projects) {
+            try {
+                SuperIndexSearcher searcher = RuntimeEnvironment.getInstance().getIndexSearcher(proj);
+                subreaders[ii++] = searcher.getIndexReader();
+                searcherList.add(searcher);
+            } catch (IOException ex) {
+                LOGGER.log(Level.SEVERE,
+                    "cannot get IndexReader for project" + proj, ex);
+            }
+        }
+        MultiReader multiReader = null;
+        try {
+            multiReader = new MultiReader(subreaders, true);
+        } catch (IOException ex) {
+            LOGGER.log(Level.SEVERE,
+                "cannot construct MultiReader for set of projects", ex);
+        }
+        return multiReader;
     }
 }

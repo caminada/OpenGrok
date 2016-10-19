@@ -25,7 +25,12 @@ Portions Copyright 2011 Jens Elkner.
 
 After include you are here: /body/div#page/div#content/
 
---%><%@ page session="false" errorPage="error.jsp" import="
+--%>
+<%@page import="org.json.simple.JSONArray"%>
+<%@page import="org.opensolaris.opengrok.configuration.messages.Message"%>
+<%@page import="java.util.SortedSet"%>
+<%@page import="org.opensolaris.opengrok.configuration.RuntimeEnvironment"%>
+<%@ page session="false" errorPage="error.jsp" import="
 java.io.File,
 java.io.IOException,
 
@@ -98,9 +103,25 @@ include file="pageheader.jspf"
     %></div>
 </div>
 <div id="Masthead">
-    <tt><a href="<%= context + Prefix.XREF_P %>/">xref</a>: <%= Util
-        .breadcrumbPath(context + Prefix.XREF_P, path,'/',"",true,cfg.isDir())
-    %></tt>
+    <kbd>
+    <%
+    JSONArray messages = new JSONArray();
+    if (cfg.getProject() != null) {
+        messages = Util.messagesToJson(RuntimeEnvironment.MESSAGES_MAIN_PAGE_TAG,
+                            cfg.getProject().getDescription());
+    }
+    %>
+    <% if (!messages.isEmpty()) { %>
+    <span class="important-note">
+    <% } %>
+        <a href="<%= context + Prefix.XREF_P %>/">xref</a>: <%= Util
+        .breadcrumbPath(context + Prefix.XREF_P, path,'/',"",true,cfg.isDir()) %>
+    <% if (!messages.isEmpty()) { %>
+    </span>
+    <span class="important-note important-note-rounded"
+          data-messages='<%= messages %>'>!</span>
+    <% } %>
+</kbd>
 </div>
 <div id="bar">
     <ul>
